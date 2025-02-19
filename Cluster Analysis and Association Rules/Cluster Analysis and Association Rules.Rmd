@@ -1,0 +1,367 @@
+---
+title: "Cluster Analysis and Association Rules: Exploring Sediment Chemistry and Library Transactions"
+author: "Nazgul Altynbekova"
+output: html_document
+---
+
+<style>
+.answer {
+  background-color: #d0ebff;
+  padding: 20px;
+}
+
+.answer pre {
+  background-color: #d0ebff;
+}
+</style>
+
+```{r message=FALSE}
+library(tidyverse)
+library(GGally)
+library(factoextra)
+library(arules)
+library(arulesViz)
+library(ggplot2)
+library(dplyr)
+library(recipes)
+
+```
+
+
+### 1: Cluster Analysis
+
+This is analysis of 38 samples of sediment collected from around the 'Ekofisk' oil field in the North Sea. There are seven variables representing the physical chemistry of the sediment samples. We are going to use cluster analysis to look for 'natural' groups of samples.
+
+The seven variables are as follows:
+
+ **Name**     **Description** 
+ -----------  -----------------
+  `Redox`     Oxidisation potential. 
+  `Phi_mean`  Average particle size (high = sandy; low = muddy). 
+  `Ba`        Concentration of barium. 
+  `Sr`        Concentration of strontium. 
+  `Cu`        Concentration of copper. 
+  `Pb`        Concentration of lead. 
+  `Ni`        Concentration of nickel. 
+
+
+```{r}
+chem <- read_csv("sediment_chemistry.csv",show_col_types = FALSE)
+```
+
+#### Initial exploration of the dataset
+
+:::{class="answer"}
+
+```{r}
+chem_long <- chem |> 
+  rowid_to_column(var = 'id') |> 
+  pivot_longer(cols = -c(Redox, Phi_mean, id),
+               names_to = "Name",
+               values_to = "Value")
+  
+chem_long |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Redox, y = Value)) +
+  facet_wrap(vars(Name), ncol = 2, scales = "free_y")
+
+chem_long |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Phi_mean, y = Value)) +
+  facet_wrap(vars(Name), ncol = 2, scales = "free_y")
+
+chem_long |>
+  ggplot() +
+  aes(x = Name, y = Value) +
+  geom_boxplot()
+
+chem |>
+  prcomp() |> 
+  fviz_pca_ind(repel=T, labelsize=2)
+```
+
+
+As seen on a boxplot graph, the distribution of five heavy metals is rather disproportional and definitely needs scaling later. The values of Ba go from around 300 to nearly 5000, while Sr mainly gathered under 250, and the rest are lay closer to zero.
+
+Comparing those metals with Oxidisation potential (Redox), we again observe quite a scatter from Ba with no obvious trend or pattern, Sr hints a bit on a decreasing trend, and the rest show a noticable peak on the left and rather flat distribution of the most of points.
+
+Distribution of metals on Phi_mean shows different trends. Ba still has the most homogenous variance, but we can notice a hint of an increasing trend. This time, Sr, Cu and Pb are tend be grouped together, as they demonstrate similar image, where distribution looks rather indifferent up to the point of 3.1, after which values go much higher and further scattered. Meanwhile, Ni looks the opposite of them, having a peak in the beginning and a plain distribution on the rest of the plot.
+
+PCA plot caught some possible patterns of grouping points, which we might confirm later in the analysis.
+
+
+:::
+
+#### Preparing a new version of the dataset 
+
+:::{class="answer"}
+
+```{r}
+chem_norm <- chem |> 
+  recipe(~ .) |>
+  step_log(c(Ba, Sr, Cu, Pb, Ni)) |> 
+  step_normalize(all_predictors()) |> 
+  prep() |> 
+  bake(chem)
+
+chem_norm
+```
+As we saw before, the relationships between heavy metal features and our response variables (especially Redex) tend to have dramatic peaks to the right, which is why it is recommended to "straighten" the distribution by log-transformation, so that those highs wouldn't demand to much weghts for themselves.
+
+We also noticed that our data values are distributed fairly unequally, with huge difference in means and variances. That, again, could lead to potential disproportion of our analysis, hence the normalization. 
+
+:::
+
+#### K-means cluster analysis of the new dataset
+:::{class="answer"}
+
+```{r}
+chem_norm |> 
+  fviz_nbclust(kmeans, method = 'silhouette', k.max = 10)
+
+chem_norm |> 
+  fviz_nbclust(kmeans, method = 'wss', k.max = 10)
+```
+```{r}
+set.seed(5555)
+km_chem <- kmeans(chem_norm, centers = 3, nstart = 50) 
+
+km_chem |> 
+  fviz_cluster(data = chem_norm,
+               repel = T,
+               ggtheme = theme_bw())
+```
+
+To choose the appropriate value of k, the silhouette method was used. We can see that according to its graph, the optimal value for k is 3, providing the max silhouette value of ~0.27. That means that 3 clusters will give us the biggest possible distance between points of different clusters and closest possible distance between points of the same cluster.
+
+That choice of number of k is also supported by the least sum of squares graph (wss method), where the decrease of SS becomes less rapid after k = 3.
+
+:::
+
+#### Exploring the differences among the clusters 
+:::{class="answer"}
+```{r}
+chem_norm <- chem_norm |>  
+#  select(-Redox, -Phi_mean) |> 
+  add_column(Cluster = factor(km_chem$cluster)) 
+  
+```
+
+```{r}
+chem_norm |> 
+  ggpairs(mapping = aes(colour = Cluster),
+    upper = list(continuous = wrap("cor", size = 3)),
+    lower = list(continuous = wrap("points", size = 0.5)),
+    diag = list(continuous = wrap("barDiag", binwidth = 1)))
+```
+```{r}
+chem_norm |> 
+  group_by(Cluster) |> 
+  summarise(across(everything(), list(mean = ~mean(.), sd = ~sd(.)), .names = "{.col}_{.fn}"))
+
+```
+
+```{r}
+chem_norm_long <- chem_norm |> 
+  pivot_longer(-Cluster, names_to = "Name", values_to = "Value")
+
+ggplot(chem_norm_long, aes(x = Cluster, y = Value, fill = Cluster)) +
+  geom_boxplot() +
+  facet_wrap(~ Name, scales = "free_y") 
+```
+
+Variables Sr and Pb seem to distinguish clusters the most, comparing on the their graphs with Redox and Phi_mean, and their own distribution of clusters.
+
+:::
+
+#### Ading a new variable
+
+```{r}
+distoil <- read_csv("distance_to_oil_rig.csv",
+                    show_col_types = FALSE)
+distoil_norm <- distoil |> 
+  recipe(~ .) |>
+  step_normalize(all_predictors()) |> 
+  prep() |> 
+  bake(distoil)
+
+```
+
+:::{class="answer"}
+
+```{r}
+chem_dist <- cbind(chem_norm, Distance = distoil_norm$Distance)
+
+ggplot(chem_dist, aes(x = Cluster, y = Distance, fill = Cluster)) +
+  geom_boxplot() 
+
+ggplot(chem_dist, aes(x = Redox, y = Distance, color = Cluster)) +
+  geom_point() 
+
+ggplot(chem_dist, aes(x = Phi_mean, y = Distance, color = Cluster)) +
+  geom_point() 
+```
+
+In light of this new variable 'Distance' it looks like Cluster 1 is not relevant enough to be considered as a separate cluster, judging by distribution of Distoil itself and the scatter plot of Distoil and Redox. However, the relationship between Distoil and Phi_mean shows the potential need of the Cluster 1 being a separate cluster.
+
+Overall, there is definitely a relation between Distoil and clustering pattern, so i would recommend to include Distoil into cluster analysis and see how it will affect on results.
+
+```{r}
+#trying to see the effect of Distoil on clustering, out of curiousity
+chem_dist1 <- chem_dist |> 
+  select(-Cluster)
+
+chem_dist1 |> 
+  fviz_nbclust(kmeans, method = 'silhouette', k.max = 10)
+```
+
+```{r}
+
+set.seed(5555)
+km_chem_dist <- kmeans(chem_dist1, centers = 3, nstart = 50) 
+
+km_chem_dist |> 
+  fviz_cluster(data = chem_dist1,
+               repel = T,
+               ggtheme = theme_bw())
+```
+We still got 3 clusters, but this time they are more prominent and the silhouette value is a bit higher, which implies that Distoil contributes to distinguish clusters on a certain level.
+
+:::
+
+
+### 2: Association Rules
+
+This is analysis of a dataset `books`, which is a made-up data set of records of books borrowed from a library. It comprises 8,000 borrowers (transactions) and 303 books (items).
+
+
+```{r}
+books <- read.transactions('books.txt')
+
+books |> head(n=10) |> DATAFRAME()
+
+summary(books)
+```
+
+#### Top 10 most popular books
+
+:::{class="answer"}
+```{r}
+books |> 
+  itemFrequency() |> 
+  head(10)
+
+books |> 
+  itemFrequencyPlot(support = 0.1, 
+                    topN = 10,
+                    horiz = T) 
+```
+
+```{r}
+#top 10 books in a bit more fancy way
+books |>
+  itemFrequency() |>
+  enframe(name = "item", value = "support") |>
+  filter(support > 0.1) |>
+  head(10) |>
+  ggplot() +
+  geom_col(mapping = aes(y = item, x = support), fill = 'purple') 
+```
+
+
+
+:::
+
+#### Rules with at least 50 members have borrowed the same set(s) of books (i.e. those with support 0.00625 with confidence = 0.5)
+
+:::{class="answer"}
+
+```{r}
+book_rules <- books |> 
+  apriori(parameter = list(support = 0.00625, confidence = 0.5))
+
+book_rules |> 
+  inspectDT()
+
+book_rules |> 
+  head(50) |> 
+   plot(method = "graph", engine = "htmlwidget")
+```
+
+724 rules matched our conditions
+
+:::
+
+#### 5 rules with the highest support
+
+:::{class="answer"}
+```{r}
+book_rules |> 
+  sort(by = "support") |> 
+  head(5) |> 
+  inspect()
+```
+The rule represent the relationship between items. For example, the most frequent rule is the one where when books 41 and 114 are borrowed, book 27 is also borrowed with them.
+
+For this rule, support means how often both itemsets co-occur together (in 12.5% of all occurences).
+
+Confidence is the support of antecedent of a rule, which means that the initiator of this pairing, books 41 and 114, occurs in 57.1% of all transactions.
+
+Lift represents the final measure of confidence -- the strength of the rule. It shows that books 41 and 114 oncrease the probability of book 27 being chosen by 354.4%.
+
+:::
+
+#### Rules for which lift is greater than 30
+
+:::{class="answer"}
+```{r}
+book_rules |> 
+  subset(lift > 30) |> 
+  sort(by = "lift") |> 
+  head(50) |> 
+  inspect()
+```
+
+36 rules have a lift greater than 30
+
+:::
+
+#### Practice scenario 1
+Bob asks you for a book recommendation, saying he really enjoyed books 003 and 128. 
+(i) Which books would you recommend to Bob? 
+(ii) Which book would you recommend if you could only choose one?
+
+:::{class="answer"}
+```{r}
+book_rules |> 
+  subset(lhs %ain% c("book003", "book128")) |> 
+  sort(by = "lift") |> 
+  head(10) |> 
+  inspect()
+```
+
+Considering Bob's preferences, I'd recommend them books 188 and 279, since they are in the top 5 rules with the highest lifts and also co-occur in each others' antecedents.
+
+If we would recommend only one book, I'd choose 188, since it has the highest lift value, which means that itemset with books 3 and 128 in it increase the probability of choosing book 188 by almost 25 times.
+
+:::
+
+#### Practice scenario 2
+Bob remembers another book that he enjoyed: book 194. 
+(i) Does this new information make you more or less confident that he'll like your most recommended book from the previous question, any by how much? 
+(ii) Should you stick with your previous recommendation or change it? 
+
+:::{class="answer"}
+```{r}
+book_rules |> 
+  subset(lhs %ain% c("book003", "book128", "book194")) |> 
+  sort(by = "lift") |> 
+  head(100) |> 
+  inspect()
+```
+If we add book 194 into Bob's preferences, it narrows our choice a lot, since we have only 2 rules with all 3 books in the antecedent itemset. Now we're not that confident that Bob will enjoy book 188 the most, because there are no rules where all 4 books are present. However, the second book from our previous recommendation, book 279, appeared in a new search too. Even though the lift value is slightly lower (1512% vs 1568%, lower by around 56%), it still has a very high chance of being liked by Bob.
+
+Anyway, the best choice of recommendation fro Bob is book 279, according to our new search.It appeared as a consequent for all 3 previously liked books, has a slightly higher confidence and significantly (3 times) higher lift. That indicates that occurences with books 3, 128 and 194 increase the occurrence of book 279 by 15 times.
+
+:::
+
