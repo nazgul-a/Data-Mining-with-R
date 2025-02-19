@@ -1,0 +1,491 @@
+---
+title: "Predictive Modelling of Concrete Strength and Wine Quality"
+author: "Nazgul Altynbekova"
+output: html_document
+---
+
+
+```{r setup, echo=TRUE, warning=FALSE, message=FALSE}
+# Add any other packages you need to load here.
+library(tidyverse)
+library(skimr)
+library(VIM)
+library(rsample)
+library(tidyverse)
+library(parsnip)
+library(yardstick)
+library(broom)
+
+# Read in the data
+concrete.train <- read_csv("concrete-train.csv")
+concrete.test  <- read_csv("concrete-test.csv")
+
+red.train <- read_csv("red-train.csv") |>
+  mutate(Quality = as_factor(Quality))
+red.test  <- read_csv("red-test.csv")
+
+```
+
+### 1: Predicting Concrete Strength
+
+```{r}
+
+#checking if data is okay
+
+concrete.train
+concrete.train |> 
+  skim()
+
+```
+```{r}
+#removing outliers
+
+concrete.train1 <- concrete.train[concrete.train$Strength <= 500, ]
+concrete.train1 |> 
+  skim()
+```
+
+
+```{r}
+
+#exploring with graphs for each predictor to see if there are any relationships
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Cement, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Slag, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = FlyAsh, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Water, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Superp, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Coarse, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Fine, y = Strength))
+
+concrete.train1 |> 
+  ggplot() +
+  geom_point(mapping = aes(x = Age, y = Strength))
+
+```
+
+
+```{r}
+
+#imputing missing values with kNN
+
+concrete.train.imp <- kNN(concrete.train1, k = 5)
+concrete.train.imp <- concrete.train.imp |> 
+  select(-contains("_imp"))
+```
+
+```{r}
+head(concrete.train.imp, 10)
+```
+
+
+```{r}
+
+#splitting
+
+concrete_split <- initial_split(concrete.train.imp, prop = 3/4)
+concrete_ttrain <- training(concrete_split)
+concrete_ttest <- testing(concrete_split)
+
+```
+
+```{r}
+
+#normalizing
+
+
+```
+
+
+```{r}
+#train the model
+
+#linear regression
+concrete.lm <- linear_reg() |> 
+  fit(Strength ~ ., data = concrete_ttrain)
+concrete.lm |> 
+  tidy()
+#look at p-values, which are important
+concrete.lm1 <- lm(Strength ~ . , data = concrete_ttrain)
+
+summary(concrete.lm1)
+
+
+
+```
+
+```{r}
+#base rmse
+# Calculate the mean strength
+mean_Strength <- mean(concrete_ttrain$Strength)
+
+# Augment the linear model with the mean strength
+concrete.lm.base <- concrete.lm |>
+  augment(new_data = concrete_ttrain |> mutate(mean_Strength = mean_Strength))
+
+# Calculate the RMSE
+rmse_value <- concrete.lm.base |>
+  rmse(truth = Strength, estimate = mean_Strength)
+
+rmse_value
+
+```
+
+
+```{r}
+#linear regression
+concrete.lm.pred <- concrete.lm |> 
+  augment(new_data = concrete_ttest)
+concrete.lm.pred |> 
+  rmse(truth = Strength, estimate = .pred)
+
+
+
+```
+```{r}
+#improve the linear regression
+model2 <- lm(Strength ~ . - Coarse, - Fine , data = concrete_ttrain)
+model2_pred <- augment(model2, newdata = concrete_ttest) |> select(Strength, .fitted, everything())
+model2_pred |> rmse(truth = Strength, estimate = .fitted)
+
+
+#selecting only predictors with significant p-values didn't improve the model much
+```
+
+
+```{r}
+#tree
+tree_spec <- decision_tree(mode = "regression",
+                            cost_complexity = 0.0001) #< changed to see what happens
+
+tree_fit <- tree_spec |>
+  fit(Strength ~ ., data = concrete_ttrain)
+
+tree_pred <- concrete_ttest |>
+  bind_cols(predict(tree_fit, new_data = concrete_ttest)) |>
+  select(Strength, .pred, everything())
+
+tree_pred |> metrics(Strength, .pred)
+
+#chose cp = 0.0001 as the best
+
+```
+
+```{r}
+#forest
+concrete.rf <- rand_forest(mode = 'regression', engine = 'randomForest',
+                           mtry = 4, min_n = 5) |> 
+  fit(Strength ~ ., data = concrete_ttrain)
+concrete.rf.pred <- concrete.rf |> 
+  augment(concrete_ttest)
+concrete.rf.pred |> 
+    rmse(truth = Strength, estimate = .pred)
+
+#forest performed even better
+```
+
+```{r}
+
+#nn
+library(recipes)
+
+comp_rec <-  recipe(Strength ~ ., data = concrete_ttrain) |>
+  step_normalize(all_numeric_predictors()) |>
+  prep(training = concrete_ttrain)
+
+nn_spec <- mlp(mode = "regression", hidden_units = 4, penalty = 0.001, epochs = 10000)
+
+nn_fit <- nn_spec |>
+  fit(Strength ~ ., data = bake(comp_rec, concrete_ttrain))
+
+nn_pred <- concrete_ttest |>
+  bind_cols(
+    nn_fit |> predict(new_data = bake(comp_rec, concrete_ttest))
+  )
+
+nn_pred |> metrics(Strength, .pred)
+
+#not that good, even with decreasing decay
+```
+
+
+```{r}
+#choose the model
+#now predict on real test data
+
+#first we need to re-train our trainig data on all the trainig data
+
+#i used trimmed data, since the outlier is horrendous
+concrete.final.rf <- rand_forest(mode = 'regression', engine = 'randomForest',
+                                 mtry = 4, min_n = 5) |> 
+  fit(Strength ~ ., data = concrete.train1)
+concrete.final.rf.pred <- concrete.final.rf |> 
+  augment(concrete.test)
+
+concrete.final.rf.pred |> 
+  skim()
+```
+
+```{r}
+
+#validate! we don't have a real values
+#but we can compare a distribution of predicted variable with the distribution on the trainig data
+
+ggplot(concrete.final.rf.pred) + 
+  geom_density(mapping = aes(x = .pred))
+
+ggplot(concrete.train1) + 
+  geom_density(mapping = aes(x = Strength))
+
+
+bind_rows(list(predict = concrete.final.rf.pred |> 
+                 rename(Strength = .pred),
+               train = concrete.train1),
+          .id = 'data') -> all
+
+ggplot(all) +
+  geom_density(mapping = aes(x = Strength, col = data))
+
+#or a histogram
+ggplot(all) +
+  geom_histogram(mapping = aes(x = Strength, fill = data, bins = 10)) +
+  facet_wrap(vars(data), ncol = 1, scales = 'free_y')
+
+#predicted values and actual values of target variable seem to have a similar distribution
+```
+
+```{r}
+
+#another way is to compare by summary
+concrete.train1 |> skim() #compare min, max and mean
+concrete.final.rf.pred |> skimr::skim() #compare min, max and mean
+
+#all good
+```
+
+```{r}
+
+#write out to a file if needed
+#concrete.final.rf.pred |> 
+#  write_csv("ex1.csv")
+```
+
+
+
+#### Concrete Strength Methodology
+
+Firstly, I made a quick pre-processing with skim() and discovered some missing values and outliers. I decided to handle missing values with kNN (using k = 5), and removed rows with outliers.
+
+Now when data is clean, I split the concrete.train data into training and testing datasets, and then tried to fit a classic linear regression. The base rmse with the prediction equals mean of Strength is 16.9. With hope of getting less than that I computed prediction for a linear regression and its rmse = 10.7, which is not bad.
+
+Trying to improve the model, I looked at the summary and omitted predictors that didn't seem significant, but that didn't add any value to the model, having an rmse = 10.7.
+
+Next I fitted a decision tree model, with the best cp of 0.0001 out of all that I tried. That produced a model with rmse = 7.8. which is a major improvement.
+
+If the tree performed so well, I expected to get even better result from a random forest model. With a bit of tuning of the number of predictors and the size of each node, I got the smallest rmse out of all = 5.7.
+
+To get a full picture of possible predictive models, I fit a neural network model with an optimal number of hidden layers = 4, decay = 0.001 and 10 000 iterations. That gave us an rmse = 7.1, which is not bad, but random forest stayed leading.
+
+After choosing random forest model as the best, I re-trained the model using full training data (ii used its trimmed version since the outlier is horrendous). And then fit it to the actual testing dataset.
+
+Comparing distributions of predicted values of a target from testing dataset and actual values from training dataset, it looks rather similar. Values of min, max and the mean also look close.
+
+
+### 2: Predicting quality of red wine
+
+```{r}
+red.train |> 
+  skim()
+
+```
+
+```{r}
+#splitting
+red_split <- initial_split(red.train, prop = 3/4)
+red_ttrain <- training(red_split)
+red_ttest <- testing(red_split)
+```
+
+```{r}
+red_ttrain |> pivot_longer(where(is.numeric)) |>
+  ggplot() +
+  geom_density(aes(x=Quality)) +
+  facet_wrap(vars(name), scales='free')
+```
+
+
+```{r}
+library(discrim)
+library(tidykda)
+#lda
+spec_lda <- discrim_linear()
+fit_lda <- spec_lda |>
+  fit(Quality ~ ., data = red_ttrain)
+fit_lda
+```
+
+```{r}
+pred_lda <- fit_lda |> augment(new_data = red_ttest)
+pred_lda |> conf_mat(truth = Quality, estimate = .pred_class)
+pred_lda |> accuracy(truth = Quality, estimate = .pred_class)
+#not good, not bad
+```
+
+```{r}
+#naive bayes
+spec_nb <- naive_Bayes(engine="naivebayes")
+fit_nb1 <- spec_nb |>
+  fit(Quality ~ ., data=red_ttrain)
+
+#fit_nb1
+
+#kda
+#spec_kda <- discrim_kernel()
+#fit_kda1 <- spec_kda |>
+#  fit(Quality ~ ., data=red_ttrain)
+#fit_kda1
+
+pred_nb1 <- fit_nb1 |> augment(new_data=red_ttest)
+#pred_kda1 <- fit_kda1 |> augment(new_data=red_ttest)
+pred1 <- bind_rows(list(lda=pred_lda,
+                        nb=pred_nb1), .id='model')
+
+pred1 |> group_by(model) |> accuracy(truth=Quality, estimate=.pred_class)
+
+#kda didn't work beacuse we have more than 3 numeric predictors, but comparing lda and nn, lda showed a bit better result
+
+```
+
+```{r}
+#logistic
+red.lr <- logistic_reg() |>
+  fit(Quality ~ ., data=red_ttrain)
+red.lr.pred <- red.lr |>
+  augment(new_data = red_ttest)
+
+red.lr.pred |>
+  accuracy(truth = Quality, estimate = .pred_class)
+
+red.lr.pred |>
+  conf_mat(truth = Quality, estimate = .pred_class)
+```
+
+```{r}
+#trying to step my logistic regression to improve the predictor selection
+red.lr2 <- glm(Quality ~ ., family='binomial', data=red_ttrain)
+red.lr2 |>
+  summary()
+
+# now use step:
+red.step <- red.lr2 |>
+  step()
+
+red.step.tm <- logistic_reg() |>
+  fit(Quality ~ Acidvol + FreeSO2 + TotalSO2 + Density + Sulphates + Alcohol, data=red_ttrain)
+
+red.lr2.pred <- red.step.tm |> augment(new_data = red_ttest)
+red.lr2.pred |> accuracy(truth=Quality, estimate=.pred_class)
+red.lr2.pred |> conf_mat(truth=Quality, estimate=.pred_class)
+#well, that's a shame
+```
+
+```{r}
+#multinom
+set.seed(1234)
+red.mn <- multinom_reg() |>
+  fit(Quality ~ ., data=red_ttrain)
+
+red.mn |> pluck("fit", "convergence")
+
+red.mn.pred <- red.mn |> augment(new_data = red_ttest)
+red.mn.pred |> accuracy(truth = Quality, estimate = .pred_class) 
+red.mn.pred |> conf_mat(truth = Quality, estimate = .pred_class)
+
+#not that good
+```
+```{r}
+#knn, nn, tree and forest
+library(kknn)
+red.knn <- nearest_neighbor(mode='classification', neighbors=10) |>
+  fit(Quality ~ ., data=red_ttrain)
+
+red.rp <- decision_tree(mode="classification", min_n = 30) |>
+  fit(Quality ~ ., data=red_ttrain)
+
+red.rf <- rand_forest(mode="classification", engine="randomForest") |>
+  fit(Quality ~ ., data=red_ttrain)
+
+red.nn <- mlp(mode="classification", hidden_units = 7, epochs = 10000) |>
+  fit(Quality ~ ., data=red_ttrain)
+
+
+red.knn |> augment(new_data = red_ttest) |>
+  accuracy(truth=Quality, estimate = .pred_class)
+
+red.rp |> augment(new_data = red_ttest) |>
+  accuracy(truth=Quality, estimate = .pred_class)
+
+red.rf |> augment(new_data = red_ttest) |>
+  accuracy(truth=Quality, estimate = .pred_class)
+
+red.nn |> augment(new_data = red_ttest) |>
+  accuracy(truth=Quality, estimate = .pred_class)
+
+#knn leading
+#tuning number of observations on a tree didn't do much
+```
+
+```{r}
+#re-training and testing
+
+red.final.rf <- rand_forest(mode="classification", engine="randomForest") |>
+  fit(Quality ~ ., data=red.train)
+
+
+red.final.rf.pred <- red.final.rf |> 
+  augment(new_data = red.test)
+
+red.final.rf.pred |> 
+  skim()
+red.train |> 
+  skim() #compare min, max and mean
+
+#write out to a file if needed
+#red.final.rf.pred |> 
+#  write_csv("ex2_22012935.csv")
+```
+
+
+
+#### Red wine quality methodology
+
+
+First skim didn't indicate any issues with data, so I was able to start from splitting it right away. 
+
+I started from generative classifiers like LDA and Naive Bayes. Couldn't try KDA, since we have more than 3 numeric predictors. According to accuracy test, NB performed better with estimation score = 0.73.
+
+Then I moved to discriminative classier - logistic regression. Oddly enough, it got the same accuracy score as LDA = 0.703. 
+
+I attempted to improve this model using stepwise to select best possible predictors, but that didn't improve the accuracy much.
+
+After fitting a bunch of classifiers like kNN, neural network, random forest and a decision tree, we got our winner, and it's a random forest again with an accuracy score of ~0.79. No tuning of other models didn't help to beat that number, so I chose this model as the final one to predict an actual target.
