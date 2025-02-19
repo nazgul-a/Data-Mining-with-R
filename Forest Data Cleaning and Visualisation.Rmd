@@ -1,0 +1,320 @@
+---
+title: "Data Cleaning and kNN Imputation for Forest Cover Dataset"
+author: "Nazgul Altynbekova"
+output: html_document
+---
+
+```{r setup, echo=TRUE, warning=FALSE, message=FALSE}
+# Add any other packages you need to load here.
+library(tidyverse)
+library(skimr)
+library(visdat)
+library(naniar)
+library(VIM)
+library(Manu)
+library(mice)
+
+# Read in the data
+cover <- read_csv("cover.csv")
+cover_types <- read_csv("cover_types.csv")
+attach(cover)
+```
+
+### 1
+
+#### Checking data for missing values
+
+```{r}
+
+head(cover)
+cover
+#-9999
+cover |> skim()
+#H.dist, V.dist, Shade3
+
+```
+
+"-9999" is used to encode missing values.
+
+
+Now we're looking for variables H.dist, V.dist, Shade3 to count missing values:
+
+```{r}
+
+cover |> 
+  summarise(miss_H.dist = sum(H.dist == -9999),
+            miss_V.dist = sum(V.dist == -9999),
+            miss_Shade3 = sum(Shade3 == -9999))
+
+```
+
+Counting rows that contain more than one missing value:
+
+```{r}
+
+sum(rowSums(cover == -9999, na.rm = TRUE) > 1)
+
+```
+
+Seems like there's no rows with more than one missing value at a time
+
+
+#### Cleaning missing values by replacing with NA
+
+```{r}
+
+cover_na <- cover |> 
+  replace_with_na_all(
+    condition = ~.x == -9999)
+
+skim(cover_na)
+attach(cover_na)
+
+```
+
+
+#### Plotting `H.dist` vs `Type`
+
+```{r}
+
+class(Type)
+Type = as.factor(Type)
+cover_types
+
+```
+
+```{r}
+
+cover_na |> 
+  ggplot() +
+  geom_boxplot(mapping = aes(
+    x = factor(Type), 
+    y = H.dist, 
+    color = factor(Type))) +
+  labs(x = "Forest cover type",
+       y = "Horizontal distance (m) to water",
+       title = "Horizontal Distance by Forest Cover Type") +
+  scale_color_discrete(name = "Forest cover type",
+                       labels = c("Spruce-Fir", "Lodgepole Pine", "Ponderosa Pine","Cottonwood/Willow", 
+                                "Aspen", "Douglas-fir", "Krummholz")) +
+  theme_minimal()
+
+```
+
+The boxplot shows that horizontal distance differs significantly from type to type, which indicates that Type might be a relevant predictor of H.dist. I suggest we should use Type for k-nearest imputation of H.dist
+
+```{r}
+cover_na |> left_join(cover_types) |>
+  ggplot() +
+  geom_boxplot(mapping = aes(y = Description, x = H.dist))
+```
+
+
+#### Applying kNN imputation
+
+```{r}
+
+#I want to find which row has a missing value of H.dist to identify its Type
+na_row <- which(is.na(cover_na$H.dist))
+cover_na[1096, ]
+cover_na_Type2 <- cover_na |> 
+  filter(Type == 2)
+
+#Now I created a table with all the imputed values of H.dist in Type 2 using a for loop
+kays <- c(1, 2, 5, 10, 20, 50, 100, 500, 1000, 5000)
+imp_H.dist <- vector("list", length(kays))
+
+for (a in kays) {
+  new_df <- kNN(cover_na_Type2, variable = "H.dist", k = a)
+  imp_H.dist[[as.character(a)]] <- new_df$H.dist[na_row]
+}
+
+imp_table <- data.frame(k = kays, imp_H.dist_value = unlist(imp_H.dist))
+imp_table
+
+```
+
+Filtering only Type 2 data created the same imputed values of H.dist, no matter the value of k, which indicates that using Type as a predictor for H.dist probably reduces the dataset too much, so that knn imputation becomes insufficient.
+
+
+```{r}
+
+#I wanted to check if imputation shos better result using the whole dataset
+kays <- c(1, 2, 5, 10, 20, 50, 100, 500, 1000, 5000)
+imp_H.dist2 <- vector("list", length(kays))
+
+for (a in kays) {
+  new_df2 <- kNN(cover_na, variable = "H.dist", k = a)
+  imp_H.dist2[[as.character(a)]] <- new_df2$H.dist[na_row]
+}
+
+imp_table2 <- data.frame(k = kays, imp_H.dist_value_full = unlist(imp_H.dist2))
+imp_table2
+
+```
+It did! Relying on Type variable wasn't the best idea, and k-nearest neighbour imputation produced clearer results with the full dataset.
+
+
+```{r}
+k_values <- tibble(k = c(1,2,5,10,20,50,100,500,1000,5000))
+
+# helper function to do the kNN for a given k
+my_kNN <- function(k) {
+  kNN(cover_na |> mutate(Type = as_factor(Type)),
+      variable="H.dist",
+      k = k)
+}
+
+imputed_h_dist <- k_values |>
+  mutate(knn = map(k, my_kNN)) |>
+  unnest(knn) |>
+  filter(H.dist_imp)
+
+imputed_h_dist
+```
+
+
+
+#### Table of imputed values
+
+
+```{r}
+imputed_h_dist |>
+  select(k, H.dist) 
+  #knitr::kable()
+```
+
+The imputed values for the different k showed an interesting dinamic in H.dist values' changes. For k up to 10 imputed values increase rather dramatically, nearly doubling its value by the k = 10. After that increasing pace slowed down and by the point of k = 100 got to its peak. Then, interestingly, with larger values of k, imputed values started to decrease.
+
+As known, the larger number of k brings more stable value of imputed variable. However, as we see in the Table, the same effect could be accomplished with k = 4 or 5. 
+
+
+### 2
+
+```{r, echo=TRUE, message=FALSE}
+# re-read the data
+cover <- read_csv("cover.csv")
+```
+
+#### Table of lowest and highest elevation by type
+
+```{r}
+
+cover |> 
+  mutate(forest_name = recode(Type,
+                             "1" = "Spruce-Fir",
+                             "2" = "Lodgepole Pine",
+                             "3" = "Ponderosa Pine",
+                             "4" = "Cottonwood/Willow",
+                             "5" = "Aspen",
+                             "6" = "Douglas-fir",
+                             "7" = "Krummholz")) |> 
+  group_by(forest_name) |> 
+  summarise(lowest_elevation = min(Elevation),
+            highest_elevation = max(Elevation)) 
+
+```
+
+```{r}
+cover |>
+  group_by(Type) |>
+  summarise(Lowest = min(Elevation), Highest = max(Elevation)) |>
+  left_join(cover_types) |>
+  select(`Forest Type` = Description, Lowest, Highest) 
+  #knitr::kable()
+```
+
+
+#### Table of slopes by type corresponding to lowest and highest elevation
+
+Table that shows at which Slopes do the lowest and highest elevations occur for each of these forest types.
+
+Finding the rows corresponding to the lowest and highest elevations for each forest type, and then using the Slope variable in the table.
+
+
+```{r}
+
+cover |> 
+  mutate(forest_name = recode(Type,
+                             "1" = "Spruce-Fir",
+                             "2" = "Lodgepole Pine",
+                             "3" = "Ponderosa Pine",
+                             "4" = "Cottonwood/Willow",
+                             "5" = "Aspen",
+                             "6" = "Douglas-fir",
+                             "7" = "Krummholz"))  |> 
+  group_by(forest_name)  |> 
+  summarise(lowest = min(Elevation),
+            highest = max(Elevation),
+            lowest_slope = Slope[which.min(Elevation)],
+            highest_slope = Slope[which.max(Elevation)]) |>
+  
+  pivot_longer(cols = c(lowest, highest),
+               names_to = "elevation_type",
+               values_to = "elevation_value")  |> 
+  mutate(slope = ifelse(elevation_type == "lowest", lowest_slope, highest_slope))  |> 
+  select(forest_name, elevation_type, elevation_value, slope)
+
+```
+
+
+```{r}
+lowest <- cover |>
+  group_by(Type) |>
+  slice_min(Elevation) |>
+  select(Type, Lowest = Slope)
+
+highest <- cover |>
+  group_by(Type) |>
+  slice_max(Elevation) |>
+  select(Type, Highest = Slope)
+
+lowest |> left_join(highest) |>
+  left_join(cover_types) |>
+  ungroup() |>
+  select(`Forest Type` = Description, `Slope at Lowest Elevation` = Lowest, `Slope at Highest Elevation` = Highest) 
+  #knitr::kable()
+```
+
+
+
+### 3 
+#### Reproducing the given figure
+
+```{r}
+
+remotes::install_github("G-Thomson/Manu")
+
+```
+
+```{r}
+
+cover_graph <- read_csv("cover.csv")
+
+```
+
+```{r}
+
+kereru <- get_pal("Kereru")[1:3]
+
+cover_graph |> 
+  filter(Type %in% c(1, 2, 3)) |> 
+
+  ggplot(mapping = aes(
+    x = Elevation,
+    y = Slope,
+    colour = factor(Type, levels = c(3,2,1))
+    )) +
+  geom_jitter(alpha = 0.2) + 
+  geom_density_2d() +
+  scale_color_manual(values = kereru, 
+                     name = "Forest type",
+                     labels = c("Ponderosa Pine", "Lodgepole Pine", "Spruce-Fir")) +
+
+  labs(title = "Elevation and Slope of forest cover in the US") +
+  theme_minimal() +
+  theme(legend.position = "bottom") 
+  
+```
+
+
